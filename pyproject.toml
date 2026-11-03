@@ -1,0 +1,22 @@
+[project]
+name = "rxlkit"
+version = "0.1.0"
+description = "Read Trimble RoadXML (.rxl) corridors and build checked LandXML TIN surfaces from them"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = ["numpy>=1.24"]
+license = { text = "MIT" }
+authors = [{ name = "Lance Colton" }]
+
+[project.urls]
+Repository = "https://github.com/CreamyG31337/rxlkit"
+
+[project.scripts]
+rxlkit = "rxlkit.cli:main"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+packages = ["rxlkit"]
