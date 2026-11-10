@@ -19,6 +19,13 @@ class Surface:
     points: np.ndarray  # (n, 3) north, east, z
     faces: np.ndarray  # (m, 3) 0-based indices
     desc: str = ""
+    color: str = ""  # "R,G,B" - TBC's display colour (Feature trimbleCADProperties/color); "" = none
+
+
+def _color(s):
+    for p in s.iterfind(".//l:Feature[@code='trimbleCADProperties']/l:Property[@label='color']", NS):
+        return p.get("value") or ""
+    return ""
 
 
 def read_surfaces(path, visible_only=True):
@@ -33,7 +40,7 @@ def read_surfaces(path, visible_only=True):
         faces = [[pid[x] for x in f.text.split()[:3]] for f in s.iterfind(".//l:Faces/l:F", NS)
                  if not (visible_only and f.get("i") == "1")]
         out.append(Surface(s.get("name") or "", np.array(pts, float).reshape(-1, 3),
-                           np.array(faces, int).reshape(-1, 3), s.get("desc") or ""))
+                           np.array(faces, int).reshape(-1, 3), s.get("desc") or "", _color(s)))
     return out
 
 
@@ -65,7 +72,12 @@ def write_surfaces(path, surfaces, application="rxlkit", app_desc=""):
         out += [f'          <P id="{i}">{n:.4f} {e:.4f} {z:.4f}</P>' for i, (n, e, z) in enumerate(s.points, 1)]
         out += ['        </Pnts>', '        <Faces>']
         out += [f'          <F>{a + 1} {b + 1} {c + 1}</F>' for a, b, c in s.faces]
-        out += ['        </Faces>', '      </Definition>', '    </Surface>']
+        out += ['        </Faces>']
+        if s.color:
+            out += ['        <Feature code="trimbleCADProperties">',
+                    f'          <Property label="color" value={quoteattr(s.color)} />',
+                    '        </Feature>']
+        out += ['      </Definition>', '    </Surface>']
     out += ['  </Surfaces>', '</LandXML>']
     with open(path, "w", encoding="utf-8", newline="\r\n") as fh:
         fh.write("\n".join(out) + "\n")

@@ -127,6 +127,10 @@ class SurfaceTest(unittest.TestCase):
             self.assertEqual(r.name, "T & <channel>")
             self.assertLess(np.abs(r.points - s.points).max(), 5e-5)
             self.assertTrue(np.array_equal(r.faces, s.faces))
+            self.assertEqual(r.color, "")
+            s.color = "0,255,0"
+            write_surfaces(xml, [s])
+            self.assertEqual(read_surface(xml).color, "0,255,0")
             self.assertEqual(main(["check", xml]), 0)
             self.assertEqual(main(["verify", rxl, xml]), 0)
             self.assertEqual(main(["walls", rxl, d, "--prefix", "T"]), 0)
