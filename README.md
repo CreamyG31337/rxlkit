@@ -23,6 +23,7 @@ python -m rxlkit --help       # or run in place without installing (needs numpy)
 | `rxlkit walls corridor.rxl out_dir --prefix NAME` | Builds the left and right walls (toe to top) as two separate TINs. |
 | `rxlkit check surface.xml` | Runs the TIN validity checks (below) on every surface in a LandXML file. Exits 1 if any check fails. |
 | `rxlkit verify corridor.rxl surface.xml` | Exact check that a TIN built from the corridor matches its templates. It puts points along every template segment every metre, and each point must fall on the surface exactly once. A miss on a steep segment is reported as horizontal distance, and on a flat one as elevation difference. Exits 1 if anything is off the surface, overlapping, or out by more than `--tolerance` (default 25 mm). |
+| `rxlkit build spec.json out.rxl` | Builds an RXL corridor from a JSON spec: horizontal PIs (with optional curve radius), vertical PVIs (with optional symmetric parabola length) and templates (`DistanceAndVerticalDistance` segments plus where they apply). Reloads the result and reports the alignment range and closure. Example spec: `BuilderTest` in [tests/test_rxlkit.py](tests/test_rxlkit.py). |
 | `rxlkit compare corridor.rxl other.xml` | Compares any surface, such as a designer's or a previous model, with the corridor. It reports the centreline elevation difference and, on each side, how far the surface is from the design at given heights above the centreline (`--heights`). It also shows the stretch of centreline the surface covers. LandXML faces flagged invisible are ignored, as most software does. |
 
 Output files are LandXML 1.2 in metric units. Points are written as `N E Z`, to 4 decimals.
@@ -57,7 +58,7 @@ These catch the faults that make survey software flag a surface or measure to th
 Anything outside this subset raises `NotImplementedError` rather than being misread.
 
 - **Horizontal:** Straight, Arc, EntrySpiral and ExitSpiral elements (clothoid). A spiral may join two arcs.
-- **Vertical:** VPIs only, with no vertical curves.
+- **Vertical:** VPIs, with optional symmetric parabola vertical curves (not on the first or last VPI; a curve may not run past its neighbouring VPIs or overlap another curve).
 - **Templates:**
   - Segments must be `DistanceAndVerticalDistance`, and `ApplyTemplates` must be `UserDefined` or `None`, with both sides set the same way.
   - Values are interpolated linearly between template stations.

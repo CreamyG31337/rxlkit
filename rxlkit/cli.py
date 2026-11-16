@@ -1,13 +1,14 @@
 """Command line: python -m rxlkit <command> ...  (see README.md)"""
 import argparse
 import csv
+import json
 import math
 import os
 import sys
 
 import numpy as np
 
-from . import landxml, surfaces, tin
+from . import builder, landxml, surfaces, tin
 from .roadxml import Corridor
 
 
@@ -152,6 +153,16 @@ def cmd_compare(a):
         print(f"{sta:>9.2f} {Z[i, jc] - zc:>+7.3f} | " + " | ".join(cells), file=o)
 
 
+def cmd_build(a):
+    """Build an RXL corridor file from a JSON spec (horizontal PIs, vertical PVIs, templates)."""
+    with open(a.spec, encoding="utf-8") as fh:
+        spec = json.load(fh)
+    builder.write_rxl(a.out, spec)
+    c = Corridor.load(a.out)
+    worst = max((math.hypot(dn, de) for _, _, dn, de in c.alignment.closure()), default=0.0)
+    print(f"{a.out}: {c.name}, alignment {c.alignment.start:.3f}..{c.alignment.end:.3f} m, max closure {worst * 1000:.3f} mm")
+
+
 def cmd_verify(a):
     """Exact checks of a TIN built from the corridor: points on every template segment must lie on the surface,
     once. Misses on steep segments are reported as horizontal distance, on flat ones as elevation."""
@@ -228,6 +239,10 @@ def main(argv=None):
     q.add_argument("--every", type=float, default=1.0); q.add_argument("--start", type=float)
     q.add_argument("--end", type=float); q.add_argument("--tolerance", type=float, default=0.025)
     q.set_defaults(fn=cmd_verify)
+
+    q = sub.add_parser("build", help="build an RXL corridor from a JSON spec")
+    q.add_argument("spec"); q.add_argument("out")
+    q.set_defaults(fn=cmd_build)
 
     a = p.parse_args(argv)
     return a.fn(a) or 0

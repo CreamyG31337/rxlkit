@@ -1,4 +1,5 @@
 """python -m unittest discover -s tests   (from the rxl_tools folder)"""
+import json
 import math
 import os
 import sys
@@ -9,7 +10,7 @@ import xml.etree.ElementTree as ET
 import numpy as np
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
-from rxlkit import Corridor, channel_surface, read_surface, tin, wall_surface, write_surfaces  # noqa: E402
+from rxlkit import Corridor, build_rxl, channel_surface, read_surface, tin, wall_surface, write_rxl, write_surfaces  # noqa: E402
 from rxlkit.cli import main  # noqa: E402
 
 import synthetic  # noqa: E402
@@ -63,9 +64,28 @@ class ProfileTemplateTest(unittest.TestCase):
         self.assertEqual(p.elevation(40.0), 97.0)
         self.assertAlmostEqual(p.elevation(75.0), 97 - 0.7 / 2, places=9)
 
-    def test_vertical_curves_rejected(self):
-        with self.assertRaises(NotImplementedError):
+    def test_vertical_curve_validation(self):
+        with self.assertRaises(ValueError):
             corridor(vertical_curve=True)
+
+    def test_symmetric_parabola_profile(self):
+        spec = {
+            "name": "VC TEST",
+            "horizontal": {"pis": [{"north": 0.0, "east": 0.0}, {"north": 100.0, "east": 0.0}]},
+            "vertical": {"vpis": [
+                {"station": 0.0, "elevation": 100.0},
+                {"station": 50.0, "elevation": 110.0, "length": 40.0},
+                {"station": 100.0, "elevation": 105.0},
+            ]},
+            "templates": {"records": {}, "positions": []},
+        }
+        c = Corridor(ET.fromstring(build_rxl(spec)))
+        p = c.profile
+        # g1 = +0.20, g2 = -0.10, BVC = 30, EVC = 70
+        self.assertAlmostEqual(p.elevation(30.0), 106.0, places=6)
+        self.assertAlmostEqual(p.elevation(70.0), 108.0, places=6)
+        # midpoint: z_bvc + g1*20 + (g2-g1)/(2*40)*20^2 = 106 + 4 - 1.5 = 108.5
+        self.assertAlmostEqual(p.elevation(50.0), 108.5, places=6)
 
     def test_template_interpolation(self):
         L, R = self.c.templates.at(70.0)
@@ -135,6 +155,54 @@ class SurfaceTest(unittest.TestCase):
             self.assertEqual(main(["verify", rxl, xml]), 0)
             self.assertEqual(main(["walls", rxl, d, "--prefix", "T"]), 0)
             self.assertTrue(os.path.exists(os.path.join(d, "T - LEFT WALL.xml")))
+
+
+class BuilderTest(unittest.TestCase):
+    def test_build_round_trip_and_cli(self):
+        spec = {
+            "name": "ROAD & <TEST>",
+            "horizontal": {
+                "start_station": 0.0,
+                "pis": [
+                    # made-up local coordinates (public repo: never site data in tests)
+                    {"north": 1164.618, "east": 2047.312},
+                    {"north": 1197.802, "east": 2076.665, "radius": 5.0},
+                    {"north": 1237.373, "east": 2091.249},
+                ],
+            },
+            "vertical": {
+                "vpis": [
+                    {"station": 0.0, "elevation": 218.4},
+                    {"station": 44.0, "elevation": 224.0, "length": 20.0},
+                    {"station": 84.0, "elevation": 228.0},
+                ],
+            },
+            "templates": {
+                "records": {
+                    "ROAD_L": [{"code": "EDGE_L", "h": 2.5, "v": -0.05}],
+                    "ROAD_R": [{"code": "EDGE_R", "h": 2.5, "v": 0.05}],
+                },
+                "positions": [
+                    {"station": 0.0, "left": "ROAD_L", "right": "ROAD_R"},
+                    {"station": 84.0, "left": "ROAD_L", "right": "ROAD_R"},
+                ],
+            },
+        }
+        with tempfile.TemporaryDirectory() as d:
+            sp = os.path.join(d, "spec.json")
+            rxl = os.path.join(d, "out.rxl")
+            xml = os.path.join(d, "surf.xml")
+            with open(sp, "w", encoding="utf-8") as fh:
+                json.dump(spec, fh)
+            self.assertEqual(main(["build", sp, rxl]), 0)
+            c = Corridor.load(rxl)
+            self.assertEqual(c.name, "ROAD & <TEST>")
+            for tag, _, dn, de in c.alignment.closure():
+                self.assertLess(math.hypot(dn, de), 1e-4, tag)
+            s = channel_surface(c, step=0.25, name="TEST")
+            write_surfaces(xml, [s])
+            self.assertEqual(main(["check", xml]), 0)
+            self.assertEqual(main(["verify", rxl, xml]), 0)
 
 
 if __name__ == "__main__":

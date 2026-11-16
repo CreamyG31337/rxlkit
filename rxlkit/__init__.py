@@ -1,4 +1,5 @@
-"""rxlkit: read Trimble RoadXML (.rxl) corridors and turn them into checked LandXML TIN surfaces."""
+"""rxlkit: read and build Trimble RoadXML (.rxl) corridors and turn them into checked LandXML TIN surfaces."""
+from .builder import build_rxl, write_rxl
 from .landxml import Surface, read_surface, read_surfaces, write_surfaces
 from .roadxml import Alignment, Corridor, Profile, Templates
 from .surfaces import channel_surface, wall_surface

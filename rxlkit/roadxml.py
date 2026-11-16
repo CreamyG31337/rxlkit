@@ -2,7 +2,7 @@
 
 Supported subset (anything else raises NotImplementedError rather than being silently misread):
 - Horizontal: Straight, Arc, EntrySpiral, ExitSpiral (clothoid; a spiral may join two arcs).
-- Vertical: VPIs without vertical curves (grade breaks only).
+- Vertical: VPIs with optional SymmetricParabola vertical curves.
 - Templates: DistanceAndVerticalDistance segments; ApplyTemplates of Type UserDefined or None.
   Superelevation, widening and rollover are not applied.
 
@@ -136,33 +136,63 @@ class Alignment:
 
 
 class Profile:
-    """Vertical alignment from VPIs (no vertical curves)."""
+    """Vertical alignment from VPIs, with optional SymmetricParabola vertical curves."""
 
-    ALLOWED = {"KeyinMethod", "IntersectionPoint", "GradeIn", "GradeOut"}
+    ALLOWED = {"KeyinMethod", "IntersectionPoint", "GradeIn", "GradeOut", "SymmetricParabola"}
 
     def __init__(self, va):
-        self.vpis = []
+        self.vpis = []  # (station, elevation, curve_length)
         for v in va.findall("VerticalPoint"):
             extra = {c.tag for c in v} - self.ALLOWED
             if extra:
-                raise NotImplementedError(f"vertical point with {sorted(extra)} (vertical curves not supported)")
-            self.vpis.append((_f(v, "IntersectionPoint/Station"), _f(v, "IntersectionPoint/Elevation")))
+                raise NotImplementedError(f"vertical point with {sorted(extra)} (not supported)")
+            lvc = _f(v, "SymmetricParabola/Length") or 0.0
+            if lvc < 0:
+                raise ValueError(f"negative vertical curve length {lvc}")
+            self.vpis.append((_f(v, "IntersectionPoint/Station"), _f(v, "IntersectionPoint/Elevation"), lvc))
         if any(b[0] <= a[0] for a, b in zip(self.vpis, self.vpis[1:])):
             raise ValueError("VPI stations must increase")
-        self._s = np.array([s for s, _ in self.vpis])
-        self._z = np.array([z for _, z in self.vpis])
+        if self.vpis and (self.vpis[0][2] > 0 or self.vpis[-1][2] > 0):
+            raise ValueError("first and last VPI cannot have a vertical curve")
+        self._s = np.array([s for s, _, _ in self.vpis])
+        self._z = np.array([z for _, z, _ in self.vpis])
+        self._curves = []  # (bvc, evc, z_bvc, g1, g2, lvc)
+        for i in range(1, len(self.vpis) - 1):
+            s_i, z_i, lvc = self.vpis[i]
+            if lvc <= 0:
+                continue
+            s_prev, z_prev, _ = self.vpis[i - 1]
+            s_next, z_next, _ = self.vpis[i + 1]
+            bvc, evc = s_i - lvc / 2.0, s_i + lvc / 2.0
+            if bvc < s_prev - 1e-9 or evc > s_next + 1e-9:
+                raise ValueError(f"vertical curve at {s_i} extends past adjacent VPI")
+            if self._curves and bvc < self._curves[-1][1] - 1e-9:
+                raise ValueError(f"vertical curve at {s_i} overlaps previous curve")
+            g1 = (z_i - z_prev) / (s_i - s_prev)
+            g2 = (z_next - z_i) / (s_next - s_i)
+            z_bvc = z_i - g1 * (lvc / 2.0)
+            self._curves.append((bvc, evc, z_bvc, g1, g2, lvc))
 
     def elevation(self, sta):
         s = np.asarray(sta, float)
         if np.any(s < self._s[0] - 1e-6) or np.any(s > self._s[-1] + 1e-6):
             raise ValueError(f"station outside profile {self._s[0]}..{self._s[-1]}")
         z = np.interp(s, self._s, self._z)
-        return float(z) if z.ndim == 0 else z
+        for bvc, evc, z_bvc, g1, g2, lvc in self._curves:
+            m = (s >= bvc) & (s <= evc)
+            if np.any(m):
+                x = np.asarray(s)[m] - bvc
+                zc = z_bvc + g1 * x + ((g2 - g1) / (2.0 * lvc)) * x * x
+                if z.ndim == 0:
+                    z = np.asarray(zc[0])
+                else:
+                    z[m] = zc
+        return float(z) if np.ndim(sta) == 0 else z
 
     def grades(self):
         """[(station, elevation, grade in from previous VPI as a fraction or None)]."""
         out = []
-        for i, (s, z) in enumerate(self.vpis):
+        for i, (s, z, _) in enumerate(self.vpis):
             g = None if i == 0 else (z - self.vpis[i - 1][1]) / (s - self.vpis[i - 1][0])
             out.append((s, z, g))
         return out
