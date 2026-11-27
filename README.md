@@ -71,6 +71,7 @@ Offsets are positive to the right. Azimuths are measured clockwise from north.
 
 ```python
 from rxlkit import Corridor, channel_surface, write_surfaces, tin
+from rxlkit.landxml import PlanFeature, read_alignment, write_plan_features
 
 c = Corridor.load("corridor.rxl")
 n, e = c.alignment.point(125.0, -4.0)          # station, offset (+ right)
@@ -79,6 +80,11 @@ z = c.profile.elevation(125.0)
 s = channel_surface(c, name="CHANNEL")
 print(tin.quality(s.points, s.faces))
 write_surfaces("channel.xml", [s])
+
+# LandXML <Alignment> reading (Line, Curve, Spiral) and <PlanFeature> writing
+aln = read_alignment("alignment.xml")
+n, e = aln.point(125.0, 2.0)
+write_plan_features("linework.xml", [PlanFeature("PF1", [[1000, 2000, 100], [1010, 2000, 99.9]], layer="UTILITIES")])
 ```
 
 ## Tests
