@@ -85,6 +85,12 @@ write_surfaces("channel.xml", [s])
 aln = read_alignment("alignment.xml")
 n, e = aln.point(125.0, 2.0)
 write_plan_features("linework.xml", [PlanFeature("PF1", [[1000, 2000, 100], [1010, 2000, 99.9]], layer="UTILITIES")])
+
+# Station text (rounded before splitting: 999.996 -> "1+000.00"; unit=100 for "901+25" highway stationing)
+from rxlkit.stations import fmt_sta, parse_sta, excel_sta_format
+fmt_sta(-5.81)            # "-0+005.81"
+parse_sta("1+005.81")     # 1005.81
+excel_sta_format()        # '0"+"000.00;-0"+"000.00' - numeric Excel cells shown as stations
 ```
 
 ## Tests
