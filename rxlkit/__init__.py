@@ -9,6 +9,8 @@ from .landxml import (
     read_plan_features,
     read_surface,
     read_surfaces,
+    sample_segments,
+    segment_length,
     write_plan_features,
     write_surfaces,
 )

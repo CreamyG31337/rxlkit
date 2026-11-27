@@ -4,6 +4,7 @@ Points are (north, east, z), matching LandXML's "N E Z" order in <P>, <Start>, <
 Faces are 0-based index triples in memory and 1-based ids in the file.
 """
 import math
+import warnings
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass
 from datetime import date
@@ -31,7 +32,11 @@ class PlanFeature:
     layer: str = ""
     color: str = ""  # "R,G,B"
     closed: bool = False
-    segments: list | None = None  # optional analytical line/curve segments for <CoordGeom>
+    # Optional analytical segments for <CoordGeom>, written instead of ``points`` when given:
+    #   {"kind": "line", "start": (n, e, z), "end": (n, e, z)}
+    #   {"kind": "curve", "rot": "cw"|"ccw", "start": ..., "center": (n, e), "end": ..., ["radius"], ["pi"]}
+    # (z linear along each segment). ``sample_segments`` densifies them.
+    segments: list | None = None
 
 
 def _color(s):
@@ -155,9 +160,13 @@ class LandXMLAlignment:
             # Absorb tiny numeric clothoid closure drift linearly across the spiral
             dn = el["end"][0] - rows[-1][1]
             de = el["end"][1] - rows[-1][2]
-            if math.hypot(dn, de) < 0.1:
+            miss = math.hypot(dn, de)
+            if miss < 0.1:
                 rows = [(s, rn + ((s - s0) / L) * dn, re + ((s - s0) / L) * de, raz, rk)
                         for s, rn, re, raz, rk in rows]
+            else:
+                warnings.warn(f"Spiral at sta {s0:.3f}: integrated end misses <End> by {miss:.3f} m "
+                              "(check rot/radius/start tangent); left uncorrected", stacklevel=3)
         return rows
 
     @property
@@ -215,6 +224,36 @@ class LandXMLAlignment:
         return stas, n, e
 
 
+def _direction_unit(root):
+    """LandXML <Units> directionUnit ("radians", "decimal degrees", "grads"); default radians."""
+    for el in root.iter():
+        if _local_tag(el) in ("Metric", "Imperial") and el.get("directionUnit"):
+            return el.get("directionUnit").lower()
+    return "radians"
+
+
+def _dir_to_az(val, unit):
+    """LandXML direction (counter-clockwise from east, in ``unit``) -> azimuth (radians, clockwise from north).
+
+    LandXML 1.2 directions (Line/@dir, Curve/@dirStart, ...) are math angles from the +E axis; Civil 3D
+    and TBC exports follow this (a Line heading N 40.28 E has dir="49.72" in degrees).
+    """
+    v = float(val)
+    if "degree" in unit:
+        v = math.radians(v)
+    elif "grad" in unit or "gon" in unit:
+        v = v * math.pi / 200.0
+    return math.pi / 2.0 - v
+
+
+def _az_to_dir(az):
+    """Azimuth (radians, clockwise from north) -> LandXML direction in radians (CCW from east, 0..2pi)."""
+    return (math.pi / 2.0 - az) % (2.0 * math.pi)
+
+
+_SKIP_GEOM = {"Feature", "PI", "Start", "End", "Center"}
+
+
 def _parse_radius(val):
     if val is None or str(val).strip().upper() in ("", "INF", "INFINITE"):
         return 0.0
@@ -225,9 +264,14 @@ def _parse_radius(val):
 def read_alignments(path, step=0.05):
     """Read all LandXML ``<Alignment>`` elements in ``path`` as ``LandXMLAlignment`` objects.
 
-    Supports ``<Line>``, ``<Curve>`` (``rot="cw"|"ccw"``), and ``<Spiral>`` (clothoid).
+    Supports ``<Line>``, ``<Curve>`` (``rot="cw"|"ccw"``), and ``<Spiral>``. Spirals are integrated as
+    clothoids (curvature linear in length); other ``spiType`` values (Civil 3D's ``biquadratic``, cubic
+    parabola, ...) differ by millimetres over typical lengths and are pinned to the file's ``<End>`` point.
+    Geometry is taken from the Start/Center/End/PI points; ``dir`` attributes are only used for a spiral
+    start tangent when there is no PI and no previous element.
     """
     root = ET.parse(path).getroot()
+    dir_unit = _direction_unit(root)
     out = []
     for aln in root.iter():
         if _local_tag(aln) != "Alignment":
@@ -240,9 +284,15 @@ def read_alignments(path, step=0.05):
         elements = []
         for seg in cg:
             tag = _local_tag(seg)
+            if tag not in ("Line", "Curve", "Spiral"):
+                if tag not in _SKIP_GEOM:
+                    warnings.warn(f"alignment {name!r}: unsupported <{tag}> skipped; stations after it "
+                                  "come from staStart attributes or are shifted", stacklevel=2)
+                continue
             p0 = _child_point(seg, "Start")
             p1 = _child_point(seg, "End")
             if p0 is None or p1 is None:
+                warnings.warn(f"alignment {name!r}: <{tag}> without Start/End skipped", stacklevel=2)
                 continue
             if "staStart" in seg.attrib:
                 sta = float(seg.attrib["staStart"])
@@ -262,15 +312,9 @@ def read_alignments(path, step=0.05):
                     raise ValueError(f"Curve in alignment {name!r} missing <Center>")
                 r = float(seg.attrib.get("radius", math.hypot(p0[0] - pc[0], p0[1] - pc[1])))
                 sign = 1.0 if rot == "cw" else -1.0  # + curvature turns right (clockwise azimuth)
-                # Radius vector from center to start: (n0-nc, e0-ec)
+                # Radial (center -> start) = (rn, re). Tangent is the radial turned 90 deg:
+                # CW heading = (dN, dE) = (-re, rn); CCW heading = (re, -rn). Azimuth = atan2(dE, dN).
                 rn0, re0 = p0[0] - pc[0], p0[1] - pc[1]
-                # Tangent azimuth clockwise from north:
-                # For CW (turning right), center is to the right of heading -> heading = radial rotated 90 deg CCW:
-                # radial = (rn, re); turning right means heading_N = re, heading_E = -rn? Wait:
-                # If center is East (re < 0, i.e. p0 is West of center: rn=0, re=-R), heading North (dN=1, dE=0):
-                # az=0 -> (cos az, sin az) = (1, 0) = (-re/R, rn/R) -> atan2(rn, -re) for CW!
-                # Check: p0 North of center (rn=+R, re=0), CW moves East (az=pi/2): atan2(+R, 0) = +pi/2. Exact!
-                # For CCW (center to left): p0 South of center (rn=-R, re=0), moves East (az=pi/2): atan2(-(-R), 0)=+pi/2.
                 az0 = math.atan2(rn0, -re0) if rot == "cw" else math.atan2(-rn0, re0)
                 if "length" in seg.attrib:
                     length = float(seg.attrib["length"])
@@ -299,7 +343,10 @@ def read_alignments(path, step=0.05):
                     # Continuous tangent from previous element end
                     prev = elements[-1]
                     az0 = prev["az0"] + 0.5 * (prev["k0"] + prev["k1"]) * prev["L"]
+                elif seg.get("dirStart") is not None:
+                    az0 = _dir_to_az(seg.get("dirStart"), dir_unit)
                 else:
+                    # Chord direction is off by ~theta/3 (spiral deflection); end drift > 0.1 m warns below
                     az0 = math.atan2(p1[1] - p0[1], p1[0] - p0[0])
                 elements.append(dict(tag="Spiral", s0=sta, L=length, k0=k0, k1=k1,
                                      n0=p0[0], e0=p0[1], az0=az0, end=(p1[0], p1[1])))
@@ -379,20 +426,16 @@ def write_plan_features(path, features, application="rxlkit", app_desc="", proje
                 elif kind == "curve":
                     rot = seg.get("rot", "cw").lower()
                     pc = seg["center"]
-                    r = float(seg.get("radius", math.hypot(p0[0] - pc[0], p0[1] - pc[1])))
+                    _, da, r = _curve_sweep(seg)
                     rn0, re0 = p0[0] - pc[0], p0[1] - pc[1]
                     rn1, re1 = p1[0] - pc[0], p1[1] - pc[1]
-                    a0 = math.atan2(rn0, re0)
-                    a1 = math.atan2(rn1, re1)
-                    da = (a0 - a1) if rot == "cw" else (a1 - a0)
-                    while da <= 0:
-                        da += 2.0 * math.pi
                     L = float(seg.get("length", r * da))
                     az0 = math.atan2(rn0, -re0) if rot == "cw" else math.atan2(-rn0, re0)
                     az1 = math.atan2(rn1, -re1) if rot == "cw" else math.atan2(-rn1, re1)
                     out += [
                         f'        <Curve rot="{rot}" radius="{r:.5f}" length="{L:.5f}" '
-                        f'dirStart="{az0:.11f}" dirEnd="{az1:.11f}" staStart="{sta:.5f}">',
+                        f'dirStart="{_az_to_dir(az0):.11f}" dirEnd="{_az_to_dir(az1):.11f}" '
+                        f'staStart="{sta:.5f}">',
                         f'          <Start>{_fmt_pt(p0)}</Start>',
                         f'          <Center>{_fmt_pt(pc)}</Center>',
                         f'          <End>{_fmt_pt(p1)}</End>',
@@ -431,6 +474,67 @@ def write_plan_features(path, features, application="rxlkit", app_desc="", proje
     out += ['  </PlanFeatures>', '</LandXML>']
     with open(path, "w", encoding="utf-8", newline="\r\n") as fh:
         fh.write("\n".join(out) + "\n")
+
+
+def _curve_sweep(seg):
+    """(a0, da, r) for a curve segment dict: start math angle (from +E, CCW), swept angle > 0, radius."""
+    p0, p1, pc = seg["start"], seg["end"], seg["center"]
+    r = float(seg.get("radius") or math.hypot(p0[0] - pc[0], p0[1] - pc[1]))
+    a0 = math.atan2(p0[0] - pc[0], p0[1] - pc[1])
+    a1 = math.atan2(p1[0] - pc[0], p1[1] - pc[1])
+    da = (a0 - a1) if seg.get("rot", "cw").lower() == "cw" else (a1 - a0)
+    while da <= 1e-12:
+        da += 2.0 * math.pi
+    return a0, da, r
+
+
+def _sample_curve(seg, step):
+    a0, da, r = _curve_sweep(seg)
+    p0, p1, pc = seg["start"], seg["end"], seg["center"]
+    z0 = p0[2] if len(p0) > 2 else float("nan")
+    z1 = p1[2] if len(p1) > 2 else float("nan")
+    cw = seg.get("rot", "cw").lower() == "cw"
+    nstep = max(2, int(math.ceil(r * da / step)))
+    out = []
+    for k in range(nstep + 1):
+        t = k / nstep
+        ang = a0 - t * da if cw else a0 + t * da
+        z = z0 + t * (z1 - z0) if (math.isfinite(z0) and math.isfinite(z1)) else float("nan")
+        out.append((pc[0] + r * math.sin(ang), pc[1] + r * math.cos(ang), z))
+    out[-1] = (p1[0], p1[1], out[-1][2])
+    return out
+
+
+def segment_length(seg):
+    """Plan length of a ``PlanFeature.segments`` line/curve dict."""
+    if seg["kind"].lower() == "curve":
+        _, da, r = _curve_sweep(seg)
+        return r * da
+    p0, p1 = seg["start"], seg["end"]
+    return math.hypot(p1[0] - p0[0], p1[1] - p0[1])
+
+
+def sample_segments(segments, step=0.25):
+    """Densify ``PlanFeature.segments`` (line/curve dicts) into an ``(n, 3)`` north, east, z polyline.
+
+    Arcs get vertices every <= ``step`` m of arc; z is linear in length within each segment (grade).
+    """
+    pts = []
+    for seg in segments:
+        kind = seg["kind"].lower()
+        if kind == "curve":
+            seq = _sample_curve(seg, step)
+        elif kind == "line":
+            p0, p1 = seg["start"], seg["end"]
+            seq = [(p0[0], p0[1], p0[2] if len(p0) > 2 else float("nan")),
+                   (p1[0], p1[1], p1[2] if len(p1) > 2 else float("nan"))]
+        else:
+            raise ValueError(f"unsupported segment kind: {kind!r}")
+        for q in seq:
+            if pts and math.hypot(pts[-1][0] - q[0], pts[-1][1] - q[1]) <= 1e-6:
+                continue
+            pts.append(q)
+    return np.array(pts, dtype=float)
 
 
 def read_plan_features(path, arc_step=0.25):
@@ -476,22 +580,10 @@ def read_plan_features(path, arc_step=0.25):
                 r = float(seg.attrib.get("radius", math.hypot(p0[0] - pc[0], p0[1] - pc[1])))
                 segs.append({"kind": "curve", "rot": rot, "radius": r, "start": p0,
                              "center": pc, "end": p1, "pi": pi})
-                a0 = math.atan2(p0[0] - pc[0], p0[1] - pc[1])
-                a1 = math.atan2(p1[0] - pc[0], p1[1] - pc[1])
-                da = (a0 - a1) if rot == "cw" else (a1 - a0)
-                while da <= 0:
-                    da += 2.0 * math.pi
-                arc_len = r * da
-                nstep = max(2, int(math.ceil(arc_len / arc_step)))
-                for k in range(nstep + 1):
-                    t = k / nstep
-                    ang = a0 - t * da if rot == "cw" else a0 + t * da
-                    n = pc[0] + r * math.sin(ang)
-                    e = pc[1] + r * math.cos(ang)
-                    z = p0[2] + t * (p1[2] - p0[2]) if (math.isfinite(p0[2]) and math.isfinite(p1[2])) else float("nan")
-                    if k == 0 and pts and math.hypot(pts[-1][0] - n, pts[-1][1] - e) <= 1e-6:
+                for q in _sample_curve(segs[-1], arc_step):
+                    if pts and math.hypot(pts[-1][0] - q[0], pts[-1][1] - q[1]) <= 1e-6:
                         continue
-                    pts.append((n, e, z))
+                    pts.append(q)
         if pts:
             arr = np.array(pts, dtype=float)
             closed = len(arr) >= 3 and math.hypot(arr[0, 0] - arr[-1, 0], arr[0, 1] - arr[-1, 1]) < 1e-6

@@ -180,3 +180,70 @@ def test_plan_features_round_trip(tmp_path):
     assert loaded[1].points[-1] == pytest.approx([1006.0, 2004.0, 99.95], abs=1e-4)
     assert len(loaded[1].points) > 10  # arc was sampled smoothly
     assert loaded[2].closed is True
+
+
+def test_plan_feature_curve_dir_is_ccw_from_east(tmp_path):
+    # LandXML directions are math angles (CCW from +E), like Civil 3D/TBC Line@dir, not north azimuths.
+    # CW quarter circle: start heading North (dir = 90 deg), end heading East (dir = 0).
+    import xml.etree.ElementTree as ET
+    xml = tmp_path / "arc.xml"
+    seg = {"kind": "curve", "rot": "cw", "start": (1000.0, 2000.0, 0.0), "center": (1000.0, 2010.0),
+           "end": (1010.0, 2010.0, 0.0)}
+    write_plan_features(xml, [PlanFeature("ARC", np.zeros((0, 3)), segments=[seg])])
+    c = next(e for e in ET.parse(xml).getroot().iter() if e.tag.endswith("Curve"))
+    assert float(c.get("dirStart")) == pytest.approx(math.pi / 2.0, abs=1e-9)
+    assert float(c.get("dirEnd")) == pytest.approx(0.0, abs=1e-9)
+    assert float(c.get("length")) == pytest.approx(5.0 * math.pi, abs=1e-4)
+
+
+def test_spiral_without_pi_uses_dir_start_in_degrees(tmp_path):
+    # First element is a spiral with no PI: start tangent must come from dirStart (degrees, CCW from E).
+    L, R = 20.0, 50.0
+    k1, nstep = 1.0 / R, 400
+    h = L / nstep
+    n, e, az = 1000.0, 2000.0, math.pi / 4.0  # heading NE
+    for i in range(nstep):
+        ka, kb = k1 * i * h / L, k1 * (i + 1) * h / L
+        azm = az + ka * h / 2.0 + (kb - ka) * h / 6.0
+        n += h * math.cos(azm)
+        e += h * math.sin(azm)
+        az += 0.5 * (ka + kb) * h
+    p = tmp_path / "spi.xml"
+    p.write_text(f"""<?xml version="1.0"?>
+<LandXML xmlns="http://www.landxml.org/schema/LandXML-1.2" version="1.2">
+  <Units><Metric linearUnit="meter" angularUnit="decimal degrees" directionUnit="decimal degrees"/></Units>
+  <Alignments><Alignment name="S" staStart="0"><CoordGeom>
+    <Spiral rot="cw" radiusStart="INF" radiusEnd="{R}" length="{L}" dirStart="45.0">
+      <Start>1000 2000</Start><End>{n:.6f} {e:.6f}</End>
+    </Spiral>
+  </CoordGeom></Alignment></Alignments>
+</LandXML>
+""", encoding="utf-8")
+    aln = read_alignment(p)
+    assert aln.at(0.0)[2] == pytest.approx(math.pi / 4.0, abs=1e-9)
+    assert aln.at(10.0)[:2] == pytest.approx(_mid_clothoid(10.0, L, R), abs=2e-3)
+
+
+def _mid_clothoid(s, L, R, n=1000.0, e=2000.0, az=math.pi / 4.0, steps=2000):
+    h = s / steps
+    for i in range(steps):
+        sm = (i + 0.5) * h
+        a = az + sm * sm / (2.0 * R * L)
+        n += h * math.cos(a)
+        e += h * math.sin(a)
+    return n, e
+
+
+def test_unsupported_alignment_element_warns(tmp_path):
+    p = tmp_path / "irr.xml"
+    p.write_text("""<?xml version="1.0"?>
+<LandXML xmlns="http://www.landxml.org/schema/LandXML-1.2" version="1.2">
+  <Alignments><Alignment name="A" staStart="0"><CoordGeom>
+    <Line><Start>1000 2000</Start><End>1010 2000</End></Line>
+    <IrregularLine><Start>1010 2000</Start><End>1020 2000</End><PntList2D>1010 2000 1020 2000</PntList2D></IrregularLine>
+  </CoordGeom></Alignment></Alignments>
+</LandXML>
+""", encoding="utf-8")
+    with pytest.warns(UserWarning, match="IrregularLine"):
+        aln = read_alignment(p)
+    assert aln.end == pytest.approx(10.0)
